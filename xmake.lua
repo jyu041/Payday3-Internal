@@ -5,7 +5,7 @@ local stDefaults = {
     strProcess = "",
     strEngine = "unreal",
     bGameDepth = false,
-    aUnrealSdkFiles = { "Basic.cpp", "CoreUObject_functions.cpp", "Engine_functions.cpp", "Starbreeze_functions.cpp" },
+    aUnrealSdkFiles = { "Basic.cpp", "CoreUObject_functions.cpp", "Engine_functions.cpp", "Starbreeze_functions.cpp", "WBP_QOL_SafeCrackMinigame_functions.cpp", "WBP_UI_Widget_SpeedLockpicking_QoL_functions.cpp" },
 }
 
 set_config("builddir", "Build")
