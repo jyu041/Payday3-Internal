@@ -218,6 +218,8 @@ namespace OmegaWare
 
 				if (pCharacter && *m_pInstantMinigame)
 					CompleteMinigame(pCharacter);
+				else
+					ResetMinigameTracking();
 
 				if (pCharacter && m_bNameRequested.exchange(false))
 					ApplyName(pCharacter);
@@ -252,6 +254,7 @@ namespace OmegaWare
 
 			void RestoreAll()
 			{
+				ResetMinigameTracking();
 				if (m_pSpeedPawn && Payday3::IsAliveActor(m_pSpeedPawn))
 					m_pSpeedPawn->CustomTimeDilation = 1.f;
 				m_pSpeedPawn = nullptr;
@@ -700,14 +703,59 @@ namespace OmegaWare
 				pInteractor->Multicast_CompletedInteraction(pInteraction, false);
 			}
 
-			static void CompleteMinigame(SDK::ASBZPlayerCharacter* pCharacter)
+			void ResetMinigameTracking()
 			{
+				m_pMinigameState = nullptr;
+				m_bMinigameForced = false;
+				m_tpMinigameActiveSince = {};
+			}
+
+			void CompleteMinigame(SDK::ASBZPlayerCharacter* pCharacter)
+			{
+				using Clock_t = std::chrono::steady_clock;
+				constexpr auto kSettleDelay = std::chrono::milliseconds(200);
+
 				SDK::ASBZPlayerState* pState = OW_FIELD(pCharacter, SBZPlayerState);
 				if (!Memory::IsValidObjectPtr(pState))
+				{
+					ResetMinigameTracking();
 					return;
+				}
+
+				if (m_pMinigameState != pState)
+				{
+					m_pMinigameState = pState;
+					m_bMinigameForced = false;
+					m_tpMinigameActiveSince = {};
+				}
+
 				const SDK::EPD3MiniGameState eState = pState->MiniGameState;
-				if (eState == SDK::EPD3MiniGameState::Initiated || eState == SDK::EPD3MiniGameState::InProgress)
-					pState->Server_SetMiniGameState(SDK::EPD3MiniGameState::Success);
+				const bool bActive = eState == SDK::EPD3MiniGameState::Initiated || eState == SDK::EPD3MiniGameState::InProgress;
+				if (!bActive)
+				{
+					if (m_bMinigameForced)
+						LogInfo("instant minigame: state left active after forced Success");
+					m_bMinigameForced = false;
+					m_tpMinigameActiveSince = {};
+					return;
+				}
+
+				if (m_bMinigameForced)
+					return;
+
+				const auto tpNow = Clock_t::now();
+				if (m_tpMinigameActiveSince == Clock_t::time_point{})
+				{
+					m_tpMinigameActiveSince = tpNow;
+					LogInfo("instant minigame: active state detected, waiting {} ms before Success", kSettleDelay.count());
+					return;
+				}
+				if (tpNow - m_tpMinigameActiveSince < kSettleDelay)
+					return;
+
+				m_bMinigameForced = true;
+				LogInfo("instant minigame: forcing Success once");
+				pState->Server_SetMiniGameState(SDK::EPD3MiniGameState::Success);
 			}
 
 			void ApplySpeedHack(SDK::ASBZPlayerCharacter* pCharacter)
@@ -1168,6 +1216,9 @@ namespace OmegaWare
 			bool* m_pInstantInteraction = nullptr;
 			bool* m_pInstantBagGrab = nullptr;
 			bool* m_pInstantMinigame = nullptr;
+			SDK::ASBZPlayerState* m_pMinigameState = nullptr;
+			bool m_bMinigameForced = false;
+			std::chrono::steady_clock::time_point m_tpMinigameActiveSince;
 			std::string* m_pCustomName = nullptr;
 			bool* m_pAutoSecure = nullptr;
 			bool* m_pReach = nullptr;
