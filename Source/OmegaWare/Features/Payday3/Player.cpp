@@ -15,6 +15,8 @@
 #include "OmegaGUI/OmegaGUI.hpp"
 #include "OmegaLocalization/OmegaLocalization.hpp"
 
+#include "OmegaRenderHook/Core/Guarded.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -710,6 +712,58 @@ namespace OmegaWare
 				m_tpMinigameActiveSince = {};
 			}
 
+			SDK::UPD3MiniGameWidgetBase* FindActiveMinigameWidget(SDK::ASBZPlayerState* pState)
+			{
+				SDK::UWorld* pWorld = Unreal::GetWorld();
+				if (!pWorld || !Memory::IsValidObjectPtr(pState))
+					return nullptr;
+
+				SDK::UPD3MiniGameWidgetBase* pWidget = nullptr;
+				Payday3::ForEachLevelActor(pWorld, [&](SDK::AActor* pActor) {
+					if (pWidget || !Payday3::IsAliveActor(pActor) || !pActor->IsA(SDK::ASBZMiniGameActor::StaticClass()))
+						return;
+					auto* pMiniGame = static_cast<SDK::ASBZMiniGameActor*>(pActor);
+					SDK::USBZMiniGameComponent* pComponent = pMiniGame->MiniGameComponent;
+					if (!Payday3::IsAlive(pComponent))
+						return;
+
+					const SDK::UPD3MiniGameWidgetBase* pCandidate = nullptr;
+					auto fnGetWidget = [&] { pCandidate = pComponent->GetSpawnedWidget(); };
+					OmegaRenderHook::stFault stFault;
+					if (!OmegaRenderHook::InvokeGuarded(fnGetWidget, stFault) || !Payday3::IsAlive(pCandidate))
+						return;
+					if (pCandidate->PlayerState != pState)
+						return;
+					pWidget = const_cast<SDK::UPD3MiniGameWidgetBase*>(pCandidate);
+				});
+				return pWidget;
+			}
+
+			bool CompleteMinigameThroughWidget(SDK::ASBZPlayerState* pState, std::string_view strSource)
+			{
+				SDK::UPD3MiniGameWidgetBase* pWidget = FindActiveMinigameWidget(pState);
+				if (!pWidget)
+				{
+					LogWarning("{}: active minigame has no matching spawned widget; unsafe PlayerState RPC suppressed", strSource);
+					return false;
+				}
+
+				const std::string strWidget = pWidget->Class ? pWidget->Class->GetName() : std::string("unknown widget");
+				bool bReturned = false;
+				auto fnComplete = [&] {
+					pWidget->SetMiniGameState(SDK::EPD3MiniGameState::Success);
+					bReturned = true;
+				};
+				OmegaRenderHook::stFault stFault;
+				if (!OmegaRenderHook::InvokeGuarded(fnComplete, stFault))
+				{
+					LogWarning("{}: minigame completion through {} faulted; unsafe PlayerState RPC suppressed", strSource, strWidget);
+					return false;
+				}
+				LogInfo("{}: requested Success through {}", strSource, strWidget);
+				return bReturned;
+			}
+
 			void CompleteMinigame(SDK::ASBZPlayerCharacter* pCharacter)
 			{
 				using Clock_t = std::chrono::steady_clock;
@@ -734,7 +788,7 @@ namespace OmegaWare
 				if (!bActive)
 				{
 					if (m_bMinigameForced)
-						LogInfo("instant minigame: state left active after forced Success");
+						LogInfo("instant minigame: state left active after completion attempt");
 					m_bMinigameForced = false;
 					m_tpMinigameActiveSince = {};
 					return;
@@ -754,8 +808,7 @@ namespace OmegaWare
 					return;
 
 				m_bMinigameForced = true;
-				LogInfo("instant minigame: forcing Success once");
-				pState->Server_SetMiniGameState(SDK::EPD3MiniGameState::Success);
+				CompleteMinigameThroughWidget(pState, "instant minigame");
 			}
 
 			void ApplySpeedHack(SDK::ASBZPlayerCharacter* pCharacter)
@@ -870,8 +923,8 @@ namespace OmegaWare
 				const SDK::EPD3MiniGameState eState = pState->MiniGameState;
 				if (eState == SDK::EPD3MiniGameState::Initiated || eState == SDK::EPD3MiniGameState::InProgress)
 				{
-					pState->Server_SetMiniGameState(SDK::EPD3MiniGameState::Success);
-					LogInfo("reach: finished the minigame on {}", pPending->GetOwner()->GetName());
+					if (CompleteMinigameThroughWidget(pState, "reach"))
+						LogInfo("reach: requested minigame completion on {}", pPending->GetOwner()->GetName());
 					return;
 				}
 				SDK::AActor* pPendingOwner = pPending->GetOwner();
