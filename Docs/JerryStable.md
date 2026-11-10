@@ -5,11 +5,11 @@ This fork keeps `v3` as the clean upstream mirror and uses `jerry-stable` for lo
 ## Current local patches
 
 - Guard the original AI pawn-action call with `OmegaRenderHook::InvokeGuarded` so an access violation inside the game function is skipped instead of terminating PAYDAY 3.
-- Throttle Instant Minigame completion to one delayed `Server_SetMiniGameState(Success)` request per active minigame episode.
+- Route Instant Minigame completion through the active minigame widget's `SetMiniGameState(Success)` API after a short settle delay, with guarded execution and no fallback to the crash-prone direct `ASBZPlayerState::Server_SetMiniGameState` RPC.
 - Emit PDB symbols for release builds so future crash dumps can resolve `version.dll` frames to source lines.
 - Provide `Scripts/BuildAndDeployLocal.ps1` to build, test, back up the installed proxy, deploy the new proxy and verify its SHA-256.
 
-Instant Minigame remains disabled by default. The throttling patch reduces repeated RPCs but is not treated as proof that every minigame is safe.
+Instant Minigame remains disabled by default. The direct PlayerState success RPC reproduced a pure-virtual/null-dereference crash on safes, so `jerry-stable` now avoids that RPC entirely. The widget-based path is still experimental until runtime-tested.
 
 ## Remotes
 
