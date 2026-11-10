@@ -17,6 +17,9 @@
 
 #include "OmegaRenderHook/Core/Guarded.hpp"
 
+#include "SDK/WBP_QOL_SafeCrackMinigame_classes.hpp"
+#include "SDK/WBP_UI_Widget_SpeedLockpicking_QoL_classes.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -705,11 +708,21 @@ namespace OmegaWare
 				pInteractor->Multicast_CompletedInteraction(pInteraction, false);
 			}
 
+			enum class enMinigameAdvanceResult : std::uint8_t
+			{
+				Retry,
+				Continue,
+				Stop,
+			};
+
 			void ResetMinigameTracking()
 			{
 				m_pMinigameState = nullptr;
 				m_bMinigameForced = false;
+				m_bMinigameWidgetWaitLogged = false;
+				m_uMinigameActionCount = 0;
 				m_tpMinigameActiveSince = {};
+				m_tpNextMinigameAttempt = {};
 			}
 
 			SDK::UPD3MiniGameWidgetBase* FindActiveMinigameWidget(SDK::ASBZPlayerState* pState)
@@ -739,35 +752,79 @@ namespace OmegaWare
 				return pWidget;
 			}
 
-			bool CompleteMinigameThroughWidget(SDK::ASBZPlayerState* pState, std::string_view strSource)
+			enMinigameAdvanceResult AdvanceMinigameThroughWidget(SDK::ASBZPlayerState* pState, std::string_view strSource)
 			{
 				SDK::UPD3MiniGameWidgetBase* pWidget = FindActiveMinigameWidget(pState);
 				if (!pWidget)
 				{
-					LogWarning("{}: active minigame has no matching spawned widget; unsafe PlayerState RPC suppressed", strSource);
-					return false;
+					if (!m_bMinigameWidgetWaitLogged)
+						LogWarning("{}: active minigame has no matching spawned widget yet; retrying instead of forcing Success", strSource);
+					m_bMinigameWidgetWaitLogged = true;
+					return enMinigameAdvanceResult::Retry;
 				}
+				m_bMinigameWidgetWaitLogged = false;
 
 				const std::string strWidget = pWidget->Class ? pWidget->Class->GetName() : std::string("unknown widget");
-				bool bReturned = false;
-				auto fnComplete = [&] {
-					pWidget->SetMiniGameState(SDK::EPD3MiniGameState::Success);
-					bReturned = true;
+				bool bSupported = false;
+				bool bLockpick = false;
+				bool bSafe = false;
+				double dLockpickGoalBefore = 0.0;
+				int iSafeDigit = 0;
+				int iSafeDigitCount = 0;
+				int iSafeNumber = 0;
+				enMinigameAdvanceResult eResult = enMinigameAdvanceResult::Stop;
+
+				auto fnAdvance = [&] {
+					if (pWidget->IsA(SDK::UWBP_UI_Widget_SpeedLockpicking_QoL_C::StaticClass()))
+					{
+						auto* pLockpick = static_cast<SDK::UWBP_UI_Widget_SpeedLockpicking_QoL_C*>(pWidget);
+						dLockpickGoalBefore = pLockpick->GoalProgress;
+						bSupported = true;
+						bLockpick = true;
+						pLockpick->GainProgress(1.0);
+						eResult = enMinigameAdvanceResult::Stop;
+						return;
+					}
+
+					if (pWidget->IsA(SDK::UWBP_QOL_SafeCrackMinigame_C::StaticClass()))
+					{
+						auto* pSafe = static_cast<SDK::UWBP_QOL_SafeCrackMinigame_C*>(pWidget);
+						iSafeDigit = pSafe->CurrentDigitIndex;
+						iSafeDigitCount = pSafe->TotalDigitCount;
+						iSafeNumber = pSafe->CorrectNumber;
+						pSafe->CurrentNumber = pSafe->CorrectNumber;
+						bSupported = true;
+						bSafe = true;
+						pSafe->OnSelectNumber();
+						eResult = enMinigameAdvanceResult::Continue;
+					}
 				};
+
 				OmegaRenderHook::stFault stFault;
-				if (!OmegaRenderHook::InvokeGuarded(fnComplete, stFault))
+				if (!OmegaRenderHook::InvokeGuarded(fnAdvance, stFault))
 				{
-					LogWarning("{}: minigame completion through {} faulted; unsafe PlayerState RPC suppressed", strSource, strWidget);
-					return false;
+					LogWarning("{}: widget-native minigame action through {} faulted; terminal state forcing suppressed", strSource, strWidget);
+					return enMinigameAdvanceResult::Stop;
 				}
-				LogInfo("{}: requested Success through {}", strSource, strWidget);
-				return bReturned;
+				if (!bSupported)
+				{
+					LogWarning("{}: unsupported minigame widget {}; terminal state forcing suppressed", strSource, strWidget);
+					return enMinigameAdvanceResult::Stop;
+				}
+				if (bLockpick)
+					LogInfo("{}: advanced lockpick through GainProgress on {} (goal was {:.3f})", strSource, strWidget, dLockpickGoalBefore);
+				else if (bSafe)
+					LogInfo("{}: submitted safe digit {}/{} with correct dial value {} through {}", strSource, iSafeDigit + 1, iSafeDigitCount, iSafeNumber, strWidget);
+				return eResult;
 			}
 
 			void CompleteMinigame(SDK::ASBZPlayerCharacter* pCharacter)
 			{
 				using Clock_t = std::chrono::steady_clock;
 				constexpr auto kSettleDelay = std::chrono::milliseconds(200);
+				constexpr auto kWidgetRetryDelay = std::chrono::milliseconds(100);
+				constexpr auto kSafeStepDelay = std::chrono::milliseconds(200);
+				constexpr std::uint32_t kMaxWidgetActions = 8;
 
 				SDK::ASBZPlayerState* pState = OW_FIELD(pCharacter, SBZPlayerState);
 				if (!Memory::IsValidObjectPtr(pState))
@@ -780,17 +837,23 @@ namespace OmegaWare
 				{
 					m_pMinigameState = pState;
 					m_bMinigameForced = false;
+					m_bMinigameWidgetWaitLogged = false;
+					m_uMinigameActionCount = 0;
 					m_tpMinigameActiveSince = {};
+					m_tpNextMinigameAttempt = {};
 				}
 
 				const SDK::EPD3MiniGameState eState = pState->MiniGameState;
 				const bool bActive = eState == SDK::EPD3MiniGameState::Initiated || eState == SDK::EPD3MiniGameState::InProgress;
 				if (!bActive)
 				{
-					if (m_bMinigameForced)
-						LogInfo("instant minigame: state left active after completion attempt");
+					if (m_bMinigameForced || m_uMinigameActionCount != 0)
+						LogInfo("instant minigame: state left active after widget-native automation");
 					m_bMinigameForced = false;
+					m_bMinigameWidgetWaitLogged = false;
+					m_uMinigameActionCount = 0;
 					m_tpMinigameActiveSince = {};
+					m_tpNextMinigameAttempt = {};
 					return;
 				}
 
@@ -801,14 +864,30 @@ namespace OmegaWare
 				if (m_tpMinigameActiveSince == Clock_t::time_point{})
 				{
 					m_tpMinigameActiveSince = tpNow;
-					LogInfo("instant minigame: active state detected, waiting {} ms before Success", kSettleDelay.count());
+					m_tpNextMinigameAttempt = tpNow + kSettleDelay;
+					LogInfo("instant minigame: active state detected, waiting {} ms before widget-native automation", kSettleDelay.count());
 					return;
 				}
-				if (tpNow - m_tpMinigameActiveSince < kSettleDelay)
+				if (tpNow < m_tpNextMinigameAttempt)
 					return;
 
+				const enMinigameAdvanceResult eAdvance = AdvanceMinigameThroughWidget(pState, "instant minigame");
+				if (eAdvance == enMinigameAdvanceResult::Retry)
+				{
+					m_tpNextMinigameAttempt = tpNow + kWidgetRetryDelay;
+					return;
+				}
+
+				++m_uMinigameActionCount;
+				if (eAdvance == enMinigameAdvanceResult::Continue && m_uMinigameActionCount < kMaxWidgetActions)
+				{
+					m_tpNextMinigameAttempt = tpNow + kSafeStepDelay;
+					return;
+				}
+				if (eAdvance == enMinigameAdvanceResult::Continue)
+					LogWarning("instant minigame: minigame remained active after {} widget-native actions; stopping automation", m_uMinigameActionCount);
 				m_bMinigameForced = true;
-				CompleteMinigameThroughWidget(pState, "instant minigame");
+				m_tpNextMinigameAttempt = {};
 			}
 
 			void ApplySpeedHack(SDK::ASBZPlayerCharacter* pCharacter)
@@ -923,8 +1002,18 @@ namespace OmegaWare
 				const SDK::EPD3MiniGameState eState = pState->MiniGameState;
 				if (eState == SDK::EPD3MiniGameState::Initiated || eState == SDK::EPD3MiniGameState::InProgress)
 				{
-					if (CompleteMinigameThroughWidget(pState, "reach"))
-						LogInfo("reach: requested minigame completion on {}", pPending->GetOwner()->GetName());
+					const auto tpNow = Clock_t::now();
+					if (tpNow - m_tpReachPending < std::chrono::milliseconds(200) || tpNow < m_tpNextMinigameAttempt)
+					{
+						m_pReachPending = pPending;
+						return;
+					}
+					const enMinigameAdvanceResult eAdvance = AdvanceMinigameThroughWidget(pState, "reach");
+					m_tpNextMinigameAttempt = tpNow + (eAdvance == enMinigameAdvanceResult::Retry ? std::chrono::milliseconds(100) : std::chrono::milliseconds(200));
+					if (eAdvance != enMinigameAdvanceResult::Retry)
+						LogInfo("reach: advanced minigame on {}", pPending->GetOwner()->GetName());
+					if (eAdvance != enMinigameAdvanceResult::Stop)
+						m_pReachPending = pPending;
 					return;
 				}
 				SDK::AActor* pPendingOwner = pPending->GetOwner();
@@ -1271,7 +1360,10 @@ namespace OmegaWare
 			bool* m_pInstantMinigame = nullptr;
 			SDK::ASBZPlayerState* m_pMinigameState = nullptr;
 			bool m_bMinigameForced = false;
+			bool m_bMinigameWidgetWaitLogged = false;
+			std::uint32_t m_uMinigameActionCount = 0;
 			std::chrono::steady_clock::time_point m_tpMinigameActiveSince;
+			std::chrono::steady_clock::time_point m_tpNextMinigameAttempt;
 			std::string* m_pCustomName = nullptr;
 			bool* m_pAutoSecure = nullptr;
 			bool* m_pReach = nullptr;
