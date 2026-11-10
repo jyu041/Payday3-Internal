@@ -25,7 +25,7 @@ set_toolset("sh", LlvmTool("lld-link"))
 set_toolset("ar", LlvmTool("llvm-ar"))
 add_cxxflags("-Wno-c++11-narrowing", "-Wno-microsoft-template-shadow", "-Wno-pragma-once-outside-header", "-Wno-class-conversion", "-Wno-invalid-offsetof", "-Wno-implicitly-unsigned-literal", "-Wno-undefined-bool-conversion", {tools = "clang_cl"})
 
-if is_mode("debug") then
+if is_mode("debug") or is_mode("release") then
     set_symbols("debug")
 end
 
