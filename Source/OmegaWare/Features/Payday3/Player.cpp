@@ -782,7 +782,7 @@ namespace OmegaWare
 						bSupported = true;
 						bLockpick = true;
 						pLockpick->GainProgress(1.0);
-						eResult = enMinigameAdvanceResult::Stop;
+						eResult = enMinigameAdvanceResult::Continue;
 						return;
 					}
 
@@ -823,7 +823,7 @@ namespace OmegaWare
 				using Clock_t = std::chrono::steady_clock;
 				constexpr auto kSettleDelay = std::chrono::milliseconds(200);
 				constexpr auto kWidgetRetryDelay = std::chrono::milliseconds(100);
-				constexpr auto kSafeStepDelay = std::chrono::milliseconds(200);
+				constexpr auto kWidgetStepDelay = std::chrono::milliseconds(200);
 				constexpr std::uint32_t kMaxWidgetActions = 8;
 
 				SDK::ASBZPlayerState* pState = OW_FIELD(pCharacter, SBZPlayerState);
@@ -881,7 +881,7 @@ namespace OmegaWare
 				++m_uMinigameActionCount;
 				if (eAdvance == enMinigameAdvanceResult::Continue && m_uMinigameActionCount < kMaxWidgetActions)
 				{
-					m_tpNextMinigameAttempt = tpNow + kSafeStepDelay;
+					m_tpNextMinigameAttempt = tpNow + kWidgetStepDelay;
 					return;
 				}
 				if (eAdvance == enMinigameAdvanceResult::Continue)
@@ -985,6 +985,7 @@ namespace OmegaWare
 					m_pReachPending = pBest;
 					m_iReachPendingId = iId;
 					m_tpReachPending = std::chrono::steady_clock::now();
+					m_tpNextReachMinigameAttempt = m_tpReachPending + std::chrono::milliseconds(200);
 					return;
 				}
 				pInteractor->Server_CompleteInteraction(pBest, iId);
@@ -1003,13 +1004,13 @@ namespace OmegaWare
 				if (eState == SDK::EPD3MiniGameState::Initiated || eState == SDK::EPD3MiniGameState::InProgress)
 				{
 					const auto tpNow = Clock_t::now();
-					if (tpNow - m_tpReachPending < std::chrono::milliseconds(200) || tpNow < m_tpNextMinigameAttempt)
+					if (tpNow < m_tpNextReachMinigameAttempt)
 					{
 						m_pReachPending = pPending;
 						return;
 					}
 					const enMinigameAdvanceResult eAdvance = AdvanceMinigameThroughWidget(pState, "reach");
-					m_tpNextMinigameAttempt = tpNow + (eAdvance == enMinigameAdvanceResult::Retry ? std::chrono::milliseconds(100) : std::chrono::milliseconds(200));
+					m_tpNextReachMinigameAttempt = tpNow + (eAdvance == enMinigameAdvanceResult::Retry ? std::chrono::milliseconds(100) : std::chrono::milliseconds(200));
 					if (eAdvance != enMinigameAdvanceResult::Retry)
 						LogInfo("reach: advanced minigame on {}", pPending->GetOwner()->GetName());
 					if (eAdvance != enMinigameAdvanceResult::Stop)
@@ -1371,6 +1372,7 @@ namespace OmegaWare
 			SDK::USBZBaseInteractableComponent* m_pReachPending = nullptr;
 			std::int32_t m_iReachPendingId = 0;
 			std::chrono::steady_clock::time_point m_tpReachPending;
+			std::chrono::steady_clock::time_point m_tpNextReachMinigameAttempt;
 			Config::stKeybind* m_pReachKey = nullptr;
 			bool* m_pSpeedHack = nullptr;
 			float* m_pSpeedMultiplier = nullptr;
